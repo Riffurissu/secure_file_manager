@@ -1,0 +1,200 @@
+# CI/CD-конвейер FileManager: аналог .gitlab-ci.yml для GitHub Actions.
+# Этапы: build → test → sast → deploy (джобы связаны через needs, как стадии GitLab).
+# Сборка и тесты выполняются в контейнере .NET 8 SDK; SAST — Trivy
+# (джоба падает при находках High/Critical); deploy — сборка образа из Dockerfile,
+# локальный запуск с пробросом портов и smoke-проверка /health.
+# Секреты в файле не хранятся: при необходимости задаются через `act -s NAME=value`
+# или в настройках репозитория (Settings → Secrets and variables → Actions).
+# Шаги, требующие GitHub-инфраструктуры (Code Scanning, check runs), помечены
+# `if: !env.ACT` и пропускаются при локальном запуске через act.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read           # checkout
+  checks: write            # публикация JUnit-отчёта как check run
+  security-events: write   # отправка SARIF-отчёта Trivy в Code Scanning
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  # Кэш NuGet внутри каталога проекта — тот же подход, что в .gitlab-ci.yml
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+  SOLUTION: FileManager.sln
+  API_PROJECT: FileManager.Api/FileManager.Api.csproj
+  TEST_PROJECT: FileManager.Tests/FileManager.Tests.csproj
+  IMAGE_NAME: filemanager
+
+jobs:
+  # ── Стадия Build ─────────────────────────────────────────────────────────────
+  build:
+    name: Build (.NET 8)
+    runs-on: ubuntu-latest
+    container:
+      # Компиляция внутри контейнера — аналог image: mcr.microsoft.com/dotnet/sdk:8.0
+      image: mcr.microsoft.com/dotnet/sdk:8.0
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: NuGet cache (по контрольным суммам csproj)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: .nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+
+      - name: Restore, build, publish
+        run: |
+          dotnet --info
+          dotnet restore "$SOLUTION"
+          dotnet build "$SOLUTION" --configuration Release --no-restore
+          dotnet publish "$API_PROJECT" --configuration Release --no-restore --no-build --output publish
+
+      # Аналог artifacts: expire_in 1 week
+      - name: Upload publish artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-${{ github.sha }}
+          path: publish/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ── Стадия Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Tests (JUnit + Cobertura)
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:8.0
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: NuGet cache (по контрольным суммам csproj)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: .nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+
+      # JUnit — через JunitXml.TestLogger, покрытие — через coverlet (формат Cobertura по умолчанию)
+      - name: Run tests
+        run: |
+          dotnet restore "$TEST_PROJECT"
+          dotnet test "$TEST_PROJECT" --configuration Release --no-restore \
+            --results-directory TestResults \
+            --logger "junit;LogFilePath=test-results.xml" \
+            --collect:"XPlat Code Coverage"
+
+      # JUnit-отчёт как check run на GitHub (под act шаг пропускается)
+      - name: Publish JUnit report
+        if: always() && !env.ACT
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: TestResults/**/test-results.xml
+          check_name: Unit tests (JUnit)
+
+      # Аналог artifacts: reports (junit + cobertura)
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.sha }}
+          path: TestResults/
+          retention-days: 7
+
+  # ── Стадия SAST ──────────────────────────────────────────────────────────────
+  # Trivy: уязвимости зависимостей, секреты, ошибки конфигурации Dockerfile/IaC.
+  # Джоба падает, если найдены находки уровня HIGH или CRITICAL (exit-code: 1).
+  # Исключения для сканера задаются в .trivyignore, а не в файле пайплайна.
+  sast:
+    name: SAST (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-results.sarif
+
+      # SARIF в Code Scanning (только на GitHub; под act шаг пропускается)
+      - name: Upload SARIF to Code Scanning
+        if: always() && !env.ACT
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-report-${{ github.sha }}
+          path: trivy-results.sarif
+          retention-days: 7
+
+  # ── Стадия Local Deploy ─────────────────────────────────────────────────────
+  # Сборка образа из Dockerfile и запуск с пробросом порта 8080.
+  # Демон видит контекст сборки (рабочий каталог раннера), поэтому в отличие
+  # от .gitlab-ci.yml передавать контекст через tar-архив не нужно.
+  local_deploy:
+    name: Local Deploy (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: sast
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag (короткий хеш коммита)
+        run: echo "IMAGE_TAG=$IMAGE_NAME:${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: docker build -t "$IMAGE_TAG" .
+
+      - name: Run container
+        run: |
+          docker volume create fm-data
+          docker run -d --name fm-app -p 8080:8080 -v fm-data:/data "$IMAGE_TAG"
+
+      # Smoke-проверка: сервис должен ответить на /health.
+      # Адрес хоста с демоном зависит от окружения:
+      # hosted-раннер GitHub — localhost; act с Docker Desktop — host.docker.internal;
+      # act с Docker Engine (Linux) — шлюз docker-сети из контейнера джобы.
+      - name: Smoke test /health
+        run: |
+          GATEWAY_IP=$(ip route | awk '/^default/ {print $3}')
+          for i in $(seq 1 15); do
+            for host in localhost host.docker.internal "$GATEWAY_IP"; do
+              if curl -fsS --max-time 3 "http://$host:8080/health" 2>/dev/null; then
+                echo "Сервис доступен: http://$host:8080/health"
+                exit 0
+              fi
+            done
+            sleep 2
+          done
+          echo "Сервис не ответил на /health" >&2
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs fm-app
+
+      # Аналог after_script: docker rm -f fm-app
+      - name: Stop container
+        if: always()
+        run: docker rm -f fm-app

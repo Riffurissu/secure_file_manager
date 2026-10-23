@@ -2,7 +2,7 @@
 
 HTTP-сервис файлового менеджера на ASP.NET Core (.NET 8) с SQLite. Каждый пользователь работает только в своей папке `storage/<username>/`. Все действия записываются в журнал.
 
-Приложение запускается локально или в Docker-контейнере. CI/CD в этой версии не настроен.
+Приложение запускается локально или в Docker-контейнере. CI/CD — пайплайн для GitHub Actions (`.github/workflows/ci.yml`), запускаемый в том числе локально через `act` (раздел «CI/CD»).
 
 ## Запуск в Docker
 
@@ -283,10 +283,50 @@ dotnet test FileManager.Tests --logger "trx;LogFileName=test-results.trx" --coll
 
 Отчёты: `FileManager.Tests/TestResults/`.
 
+## CI/CD
+
+Пайплайн — `.github/workflows/ci.yml` (GitHub Actions), аналог `.gitlab-ci.yml`. Этапы выполняются последовательно, как стадии GitLab:
+
+| Этап | Джоба | Что делает |
+|---|---|---|
+| Build | `build` | `dotnet restore/build/publish` в контейнере `mcr.microsoft.com/dotnet/sdk:8.0`, результат — артефакт `publish/` |
+| Test | `test` | xUnit-тесты; отчёты JUnit (`test-results.xml`) и Cobertura (`coverage.cobertura.xml`) |
+| SAST | `sast` | Trivy: уязвимости зависимостей, секреты, ошибки конфигурации Dockerfile. При находках HIGH/CRITICAL джоба завершается с ошибкой |
+| Local Deploy | `local_deploy` | сборка образа из Dockerfile, запуск контейнера с пробросом `8080`, smoke-проверка `/health`, остановка контейнера |
+
+На GitHub пайплайн запускается на push и PR: JUnit-отчёт публикуется как check run, SARIF-отчёт Trivy — в Code Scanning. Эти шаги помечены `if: !env.ACT` — при локальном запуске через act они пропускаются.
+
+### Локальный раннер (act)
+
+Требуется Docker (Docker Desktop на Windows/macOS, Docker Engine на Linux).
+
+1. Установить act:
+
+   ```text
+   winget install nektos.act
+   ```
+
+   Linux: `curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash`, macOS: `brew install act`.
+
+2. Запустить пайплайн из корня репозитория:
+
+   ```text
+   act push
+   ```
+
+   Одна джоба: `act push -j local_deploy`. Секреты, если понадобятся: `act push -s NAME=value` (сейчас передавать ничего не требуется).
+
+3. Настройки act лежат в `.actrc`:
+   - образ для джоб с `runs-on: ubuntu-latest` — `catthehacker/ubuntu:act-latest` (есть Docker CLI, node, git, curl);
+   - проброс Docker-сокета хоста в контейнеры джоб — нужен стадии `local_deploy`, где вызываются `docker build` / `docker run`;
+   - `--container-architecture linux/amd64` — для хостов с ARM.
+
 ## Структура
 
 ```text
 FileManager/
+├── .github/workflows/ci.yml CI/CD-пайплайн (GitHub Actions)
+├── .actrc                   настройки локального раннера act
 ├── Dockerfile
 ├── .dockerignore
 ├── FileManager.sln
