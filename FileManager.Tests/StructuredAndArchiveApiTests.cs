@@ -120,6 +120,7 @@ public class ArchiveApiTests : IClassFixture<IsolatedAppFixture>
     public async Task Create_then_extract_roundtrip()
     {
         var token = await ApiClient.RegisterAndLoginAsync(_client, ApiClient.NewUsername());
+        await _client.SendAsync(ApiClient.Authorized(HttpMethod.Post, "/api/folders?path=src", token));
         await _client.SendAsync(ApiClient.Authorized(HttpMethod.Put,
             "/api/files/content?path=src/a.txt", token, ApiClient.Bytes(Encoding.UTF8.GetBytes("A"))));
 
@@ -131,8 +132,10 @@ public class ArchiveApiTests : IClassFixture<IsolatedAppFixture>
             "/api/archive/extract?archive=backup.zip&destination=restored", token));
         Assert.Equal(HttpStatusCode.OK, extract.StatusCode);
 
+        // Записи архива хранят путь от домашней папки (src/a.txt), поэтому после распаковки
+        // в restored файл читается как restored/src/a.txt.
         var read = await _client.SendAsync(ApiClient.Authorized(HttpMethod.Get,
-            "/api/files/content?path=restored/a.txt", token));
+            "/api/files/content?path=restored/src/a.txt", token));
         Assert.Equal("A", Encoding.UTF8.GetString(await read.Content.ReadAsByteArrayAsync()));
     }
 

@@ -33,14 +33,17 @@ builder.Services.AddSingleton<ZipService>();
 builder.Services.AddSingleton<DriveService>();
 
 // Ограничение частоты входа по IP: не более 10 попыток в минуту с одного адреса.
+// Лимит переопределяется конфигурацией (RateLimiting:LoginPerMinute) — тесты поднимают его,
+// чтобы длинная серия запросов из одного процесса не упиралась в ограничение.
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    var loginPerMinute = builder.Configuration.GetValue("RateLimiting:LoginPerMinute", 10);
     options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
         {
-            PermitLimit = 10,
+            PermitLimit = loginPerMinute,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
         }));

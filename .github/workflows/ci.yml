@@ -5,8 +5,10 @@
 # локальный запуск с пробросом портов и smoke-проверка /health.
 # Секреты в файле не хранятся: при необходимости задаются через `act -s NAME=value`
 # или в настройках репозитория (Settings → Secrets and variables → Actions).
-# Шаги, требующие GitHub-инфраструктуры (Code Scanning, check runs), помечены
-# `if: !env.ACT` и пропускаются при локальном запуске через act.
+# Шаги, требующие GitHub-инфраструктуры (Code Scanning, check runs, выгрузка
+# артефактов), помечены `if: !env.ACT` и пропускаются при локальном запуске через
+# act: actions/upload-artifact@v4 использует GitHub API (ACTIONS_RUNTIME_TOKEN),
+# который act не эмулирует, а все файлы и так остаются в рабочем каталоге.
 
 name: CI
 
@@ -41,6 +43,21 @@ jobs:
       image: mcr.microsoft.com/dotnet/sdk:8.0
     timeout-minutes: 15
     steps:
+      # В образе SDK нет node, а JS-экшены (checkout, cache, upload-artifact)
+      # запускаются через node. На GitHub-hosted раннерах node монтируется в
+      # контейнер автоматически, act — нет, поэтому ставим его первым шагом.
+      - name: Install Node.js (for JS actions)
+        run: |
+          if command -v node > /dev/null 2>&1; then
+            echo "Node.js уже установлен: $(node --version)"
+            exit 0
+          fi
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y -qq --no-install-recommends nodejs
+          node --version
+
       - uses: actions/checkout@v4
 
       - name: NuGet cache (по контрольным суммам csproj)
@@ -57,8 +74,11 @@ jobs:
           dotnet build "$SOLUTION" --configuration Release --no-restore
           dotnet publish "$API_PROJECT" --configuration Release --no-restore --no-build --output publish
 
-      # Аналог artifacts: expire_in 1 week
+      # Аналог artifacts: expire_in 1 week. Только GitHub: под act v4-API
+      # артефактов не эмулируется, publish/ остаётся в рабочем каталоге.
       - name: Upload publish artifact
+        if: always() && !env.ACT
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: publish-${{ github.sha }}
@@ -75,6 +95,19 @@ jobs:
     timeout-minutes: 15
     needs: build
     steps:
+      # Node.js для JS-экшенов (см. шаг в джобе build)
+      - name: Install Node.js (for JS actions)
+        run: |
+          if command -v node > /dev/null 2>&1; then
+            echo "Node.js уже установлен: $(node --version)"
+            exit 0
+          fi
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y -qq --no-install-recommends nodejs
+          node --version
+
       - uses: actions/checkout@v4
 
       - name: NuGet cache (по контрольным суммам csproj)
@@ -96,14 +129,17 @@ jobs:
       # JUnit-отчёт как check run на GitHub (под act шаг пропускается)
       - name: Publish JUnit report
         if: always() && !env.ACT
+        continue-on-error: true
         uses: mikepenz/action-junit-report@v4
         with:
           report_paths: TestResults/**/test-results.xml
           check_name: Unit tests (JUnit)
 
-      # Аналог artifacts: reports (junit + cobertura)
+      # Аналог artifacts: reports (junit + cobertura). Только GitHub:
+      # под act v4-API артефактов не эмулируется, TestResults/ остаётся на диске.
       - name: Upload test reports
-        if: always()
+        if: always() && !env.ACT
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ github.sha }}
@@ -113,6 +149,10 @@ jobs:
   # ── Стадия SAST ──────────────────────────────────────────────────────────────
   # Trivy: уязвимости зависимостей, секреты, ошибки конфигурации Dockerfile/IaC.
   # Джоба падает, если найдены находки уровня HIGH или CRITICAL (exit-code: 1).
+  # Готовый экшен aquasecurity/trivy-action не используется: его установка (setup-trivy
+  # с actions/checkout, требующим token) и кэш БД (actions/cache) опираются на
+  # GITHUB_TOKEN и GitHub API, которые act не эмулирует. Поэтому — официальный
+  # установщик и CLI: поведение одинаково локально и на GitHub.
   # Исключения для сканера задаются в .trivyignore, а не в файле пайплайна.
   sast:
     name: SAST (Trivy)
@@ -122,15 +162,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Trivy
+        run: >
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh
+          | sh -s -- -b /usr/local/bin v0.70.0
+
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scanners: vuln,misconfig,secret
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          format: sarif
-          output: trivy-results.sarif
+        run: >
+          trivy fs
+          --scanners vuln,misconfig,secret
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          --format sarif
+          --output trivy-results.sarif .
 
       # SARIF в Code Scanning (только на GitHub; под act шаг пропускается)
       - name: Upload SARIF to Code Scanning
@@ -140,8 +184,11 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
+      # Только GitHub: под act v4-API артефактов не эмулируется,
+      # trivy-results.sarif остаётся в рабочем каталоге.
       - name: Upload SARIF report
-        if: always()
+        if: always() && !env.ACT
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: sast-report-${{ github.sha }}

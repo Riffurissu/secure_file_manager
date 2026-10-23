@@ -1,6 +1,6 @@
 # Настройки локального раннера act (читаются автоматически из корня репозитория).
 # Требуется свежая версия act; если флаг не поддерживается — обновите act или
-# передайте его в командной строке (см. README, раздел «CI/CD»).
+# передайте его в командной строке.
 
 # Образ для джоб с runs-on: ubuntu-latest: Docker CLI, node, git, curl.
 -P ubuntu-latest=catthehacker/ubuntu:act-latest
@@ -8,6 +8,6 @@
 # Архитектура контейнеров джоб (нужна на ARM-хостах, на x64 безвредна).
 --container-architecture linux/amd64
 
-# Проброс Docker-сокета хоста в контейнеры джоб — нужен стадии local_deploy,
-# где вызываются docker build и docker run.
---container-options "-v /var/run/docker.sock:/var/run/docker.sock"
+# Docker-сокет в контейнеры джоб act монтирует сам, ручной маунт не нужен:
+# дублирование пути /var/run/docker.sock ломает запуск контейнеров catthehacker
+# (ошибка "Duplicate mount point").

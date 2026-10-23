@@ -16,6 +16,9 @@ public sealed class IsolatedApp : WebApplicationFactory<Program>
         Directory.CreateDirectory(Root);
         builder.UseSetting("Storage:Root", Path.Combine(Root, "storage"));
         builder.UseSetting("Database:Path", Path.Combine(Root, "test.db"));
+        // Лимит входов по IP (10/мин) в тестах не проверяется: серия логинов одного
+        // класса укладывается в одно минутное окно и упирается в 429 с пустым телом.
+        builder.UseSetting("RateLimiting:LoginPerMinute", "1000000");
     }
 
     protected override void Dispose(bool disposing)

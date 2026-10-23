@@ -29,6 +29,11 @@ public sealed class FileService(SafePathResolver resolver, FileRepository files)
 
     private const string TempPrefix = ".fm-tmp-";
 
+    // Атомарная замена делается несколькими попытками: на Windows MoveFile с перезаписью
+    // может кратковременно получить Access denied, пока антивирус или индексатор удерживает файл.
+    private const int MoveRetryAttempts = 4;
+    private static readonly TimeSpan MoveRetryDelay = TimeSpan.FromMilliseconds(50);
+
     // Файловая система Windows не различает регистр имён: поиск в БД и блокировки ведём без учёта регистра.
     // В Linux (контейнер) регистр значим, поэтому сравнение точное.
     private static readonly bool IgnoreCase = OperatingSystem.IsWindows();
@@ -159,7 +164,7 @@ public sealed class FileService(SafePathResolver resolver, FileRepository files)
             try
             {
                 File.WriteAllBytes(temp, content);
-                File.Move(temp, resolved.FullPath, overwrite: true);
+                ReplaceAtomically(temp, resolved.FullPath);
             }
             finally
             {
@@ -305,7 +310,7 @@ public sealed class FileService(SafePathResolver resolver, FileRepository files)
             try
             {
                 File.WriteAllBytes(temp, content);
-                File.Move(temp, resolved.FullPath, overwrite: true);
+                ReplaceAtomically(temp, resolved.FullPath);
             }
             finally
             {
@@ -389,6 +394,22 @@ public sealed class FileService(SafePathResolver resolver, FileRepository files)
         lock (gate)
         {
             return action();
+        }
+    }
+
+    private static void ReplaceAtomically(string temp, string destination)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, destination, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (attempt < MoveRetryAttempts && ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(MoveRetryDelay * attempt);
+            }
         }
     }
 }
