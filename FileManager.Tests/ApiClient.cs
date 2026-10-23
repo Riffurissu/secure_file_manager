@@ -20,6 +20,11 @@ public static class ApiClient
         }
 
         var login = await client.PostAsJsonAsync("/api/auth/login", new { username, password = Password });
+        if (login.StatusCode != HttpStatusCode.OK)
+        {
+            throw new InvalidOperationException($"Вход не удался: {login.StatusCode}");
+        }
+
         var body = await login.Content.ReadFromJsonAsync<JsonElement>();
         return body.GetProperty("token").GetString()!;
     }

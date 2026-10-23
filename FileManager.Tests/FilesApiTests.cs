@@ -15,6 +15,7 @@ public class FilesApiTests : IClassFixture<IsolatedAppFixture>
     public async Task Write_read_delete_file_roundtrip()
     {
         var token = await ApiClient.RegisterAndLoginAsync(_client, ApiClient.NewUsername());
+        await _client.SendAsync(ApiClient.Authorized(HttpMethod.Post, "/api/folders?path=docs", token));
         var data = Encoding.UTF8.GetBytes("hello");
 
         var put = await _client.SendAsync(ApiClient.Authorized(HttpMethod.Put,
@@ -140,15 +141,28 @@ public class FilesApiTests : IClassFixture<IsolatedAppFixture>
 
         var responses = await Task.WhenAll(tasks);
 
-        Assert.All(responses, r => Assert.True(
-            r.StatusCode is HttpStatusCode.Created or HttpStatusCode.OK,
-            $"Неожиданный статус {r.StatusCode}"));
+        // Тела неуспешных ответов включаются в сообщение: в DEVELOPMENT 500
+        // возвращают текст исключения, что упрощает диагностику в CI.
+        var failures = new List<string>();
+        foreach (var (response, index) in responses.Select((response, index) => (response, index)))
+        {
+            if (response.StatusCode is HttpStatusCode.Created or HttpStatusCode.OK)
+            {
+                continue;
+            }
+
+            failures.Add($"[{index}] {response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+        }
+
+        Assert.True(failures.Count == 0, "Неожиданные статусы: " + string.Join("; ", failures));
     }
 
     [Fact]
     public async Task Directory_size_sums_nested_files()
     {
         var token = await ApiClient.RegisterAndLoginAsync(_client, ApiClient.NewUsername());
+        await _client.SendAsync(ApiClient.Authorized(HttpMethod.Post, "/api/folders?path=dir", token));
+        await _client.SendAsync(ApiClient.Authorized(HttpMethod.Post, "/api/folders?path=dir/sub", token));
 
         await _client.SendAsync(ApiClient.Authorized(HttpMethod.Put,
             "/api/files/content?path=dir/a.bin", token, ApiClient.Bytes(new byte[10])));
@@ -166,6 +180,7 @@ public class FilesApiTests : IClassFixture<IsolatedAppFixture>
     public async Task Listing_with_withSize_fills_directory_size()
     {
         var token = await ApiClient.RegisterAndLoginAsync(_client, ApiClient.NewUsername());
+        await _client.SendAsync(ApiClient.Authorized(HttpMethod.Post, "/api/folders?path=box", token));
 
         await _client.SendAsync(ApiClient.Authorized(HttpMethod.Put,
             "/api/files/content?path=box/x.bin", token, ApiClient.Bytes(new byte[7])));
