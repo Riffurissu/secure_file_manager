@@ -1,0 +1,11 @@
+**/bin
+**/obj
+**/.vs
+**/TestResults
+FileManager.Tests
+storage
+*.db
+*.db-wal
+*.db-shm
+GitLab
+PROJECT_PLAN.md
