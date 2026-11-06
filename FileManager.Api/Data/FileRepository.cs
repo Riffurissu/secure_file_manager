@@ -275,6 +275,8 @@ public sealed class FileRepository(Database db)
     private static SqliteCommand Command(SqliteConnection connection, SqliteTransaction? tx, string sql)
     {
         var cmd = connection.CreateCommand();
+        // Текст запроса собирается только из констант, значения передаются параметрами.
+        // nosemgrep: csharp.lang.security.sqli.csharp-sqli.csharp-sqli
         cmd.CommandText = sql;
         cmd.Transaction = tx;
         return cmd;

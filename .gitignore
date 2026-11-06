@@ -573,5 +573,6 @@ $RECYCLE.BIN/
 
 # CI/CD: результаты локальных запусков act
 .nuget/
+semgrep.sarif
 trivy-results.sarif
 

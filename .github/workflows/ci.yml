@@ -1,8 +1,8 @@
-# CI/CD-конвейер FileManager: аналог .gitlab-ci.yml для GitHub Actions.
-# Этапы: build → test → sast → deploy (джобы связаны через needs, как стадии GitLab).
-# Сборка и тесты выполняются в контейнере .NET 8 SDK; SAST — Trivy
-# (джоба падает при находках High/Critical); deploy — сборка образа из Dockerfile,
-# локальный запуск с пробросом портов и smoke-проверка /health.
+# Этапы: build → test → sast → sast_code → deploy (джобы связаны через needs).
+# Сборка и тесты выполняются в контейнере .NET 8 SDK; SAST — Trivy (SCA: уязвимости
+# зависимостей, секреты, misconfig Dockerfile; падение при High/Critical) и Semgrep
+# (AST-правила по коду C#; падение при находках уровня ERROR); deploy — сборка образа
+# из Dockerfile, локальный запуск с пробросом портов и smoke-проверка /health.
 # Секреты в файле не хранятся: при необходимости задаются через `act -s NAME=value`
 # или в настройках репозитория (Settings → Secrets and variables → Actions).
 # Шаги, требующие GitHub-инфраструктуры (Code Scanning, check runs, выгрузка
@@ -20,13 +20,13 @@ on:
 permissions:
   contents: read           # checkout
   checks: write            # публикация JUnit-отчёта как check run
-  security-events: write   # отправка SARIF-отчёта Trivy в Code Scanning
+  security-events: write   # отправка SARIF-отчётов Trivy и Semgrep в Code Scanning
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
-  # Кэш NuGet внутри каталога проекта — тот же подход, что в .gitlab-ci.yml
+  # Кэш NuGet внутри каталога проекта
   NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
   SOLUTION: FileManager.sln
   API_PROJECT: FileManager.Api/FileManager.Api.csproj
@@ -54,7 +54,9 @@ jobs:
           fi
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          # Скачивание в файл и отдельный запуск: curl | bash — антипаттерн gha-curl-pipe-shell
+          curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource-setup.sh
+          bash /tmp/nodesource-setup.sh
           apt-get install -y -qq --no-install-recommends nodejs
           node --version
 
@@ -104,7 +106,9 @@ jobs:
           fi
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          # Скачивание в файл и отдельный запуск: curl | bash — антипаттерн gha-curl-pipe-shell
+          curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource-setup.sh
+          bash /tmp/nodesource-setup.sh
           apt-get install -y -qq --no-install-recommends nodejs
           node --version
 
@@ -167,7 +171,8 @@ jobs:
       - name: Install Trivy
         run: >
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh
-          | sh -s -- -b /usr/local/bin v0.70.0
+          -o /tmp/trivy-install.sh
+          && sh /tmp/trivy-install.sh -b /usr/local/bin v0.70.0
 
       - name: Trivy scan
         run: >
@@ -197,15 +202,68 @@ jobs:
           path: trivy-results.sarif
           retention-days: 7
 
+  # ── Стадия SAST code ─────────────────────────────────────────────────────────
+  # Semgrep: правила поверх AST (p/csharp, p/owasp-top-ten) — то, что Trivy не
+  # анализирует: логика самого кода. ERROR — верхний уровень строгости правил
+  # (аналог High/Critical); флаг --error завершает джобу с ошибкой при таких находках.
+  # Исключения — через .semgrepignore или inline-подавления semgrep.
+  sast_code:
+    name: SAST code (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: sast
+    env:
+      SEMGREP_SEND_METRICS: "off"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Свой Python через экшен: системный python в act-образе (Python 3.12, Ubuntu 24.04)
+      # защищён PEP 668 — pip install без venv падает с externally-managed-environment.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install --quiet semgrep==1.182.0
+
+      - name: Semgrep scan
+        run: >
+          semgrep scan
+          --config p/csharp
+          --config p/owasp-top-ten
+          --severity ERROR
+          --exclude bin --exclude obj --exclude publish --exclude TestResults --exclude .nuget
+          --error
+          --sarif --output semgrep.sarif .
+
+      # SARIF в Code Scanning (только на GitHub; под act шаг пропускается)
+      - name: Upload SARIF to Code Scanning
+        if: always() && !env.ACT
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
+          category: Semgrep
+
+      # Только GitHub: под act v4-API артефактов не эмулируется,
+      # semgrep.sarif остаётся в рабочем каталоге.
+      - name: Upload SARIF report
+        if: always() && !env.ACT
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-code-report-${{ github.sha }}
+          path: semgrep.sarif
+          retention-days: 7
+
   # ── Стадия Local Deploy ─────────────────────────────────────────────────────
   # Сборка образа из Dockerfile и запуск с пробросом порта 8080.
-  # Демон видит контекст сборки (рабочий каталог раннера), поэтому в отличие
-  # от .gitlab-ci.yml передавать контекст через tar-архив не нужно.
+  # Демон видит контекст сборки (рабочий каталог раннера)
   local_deploy:
     name: Local Deploy (Docker)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: sast
+    needs: sast_code
     steps:
       - uses: actions/checkout@v4
 

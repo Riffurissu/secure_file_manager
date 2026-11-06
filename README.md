@@ -292,6 +292,7 @@ dotnet test FileManager.Tests --logger "trx;LogFileName=test-results.trx" --coll
 | Build | `build` | `dotnet restore/build/publish` в контейнере `mcr.microsoft.com/dotnet/sdk:8.0`, результат — артефакт `publish/` |
 | Test | `test` | xUnit-тесты; отчёты JUnit (`test-results.xml`) и Cobertura (`coverage.cobertura.xml`) |
 | SAST | `sast` | Trivy: уязвимости зависимостей, секреты, ошибки конфигурации Dockerfile. При находках HIGH/CRITICAL джоба завершается с ошибкой |
+| SAST code | `sast_code` | Semgrep: AST-правила по коду C# (`p/csharp`, `p/owasp-top-ten`); при находках уровня ERROR джоба завершается с ошибкой |
 | Local Deploy | `local_deploy` | сборка образа из Dockerfile, запуск контейнера с пробросом `8080`, smoke-проверка `/health`, остановка контейнера |
 
 На GitHub пайплайн запускается на push и PR: JUnit-отчёт публикуется как check run, SARIF-отчёт Trivy — в Code Scanning, `publish/` и отчёты — как артефакты запуска. Эти шаги помечены `if: !env.ACT` — при локальном запуске через act они пропускаются: `actions/upload-artifact@v4` требует GitHub API (`ACTIONS_RUNTIME_TOKEN`), который act не эмулирует, а все файлы и так остаются в рабочем каталоге (`publish/`, `TestResults/`, `trivy-results.sarif`).

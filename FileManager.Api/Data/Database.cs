@@ -89,6 +89,8 @@ public sealed class Database
         }
 
         using var schema = connection.CreateCommand();
+        // SchemaSql — константа без интерполяции, значений из пользовательского ввода нет.
+        // nosemgrep: csharp.lang.security.sqli.csharp-sqli.csharp-sqli
         schema.CommandText = SchemaSql;
         schema.ExecuteNonQuery();
     }

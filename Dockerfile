@@ -3,6 +3,7 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
 COPY FileManager.Api/FileManager.Api.csproj FileManager.Api/
+COPY FileManager.Api/packages.lock.json FileManager.Api/
 RUN dotnet restore FileManager.Api/FileManager.Api.csproj
 
 COPY FileManager.Api/ FileManager.Api/
