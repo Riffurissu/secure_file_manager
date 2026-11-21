@@ -315,7 +315,7 @@ dotnet test FileManager.Tests --logger "trx;LogFileName=test-results.trx" --coll
    act push
    ```
 
-   Одна джоба: `act push -j local_deploy`. Секреты, если понадобятся: `act push -s NAME=value` (сейчас передавать ничего не требуется).
+   Одна джоба: `act push -j local_deploy`. Секреты, если понадобятся: `act push -s NAME=value`.
 
 3. Настройки act лежат в `.actrc`:
    - образ для джоб с `runs-on: ubuntu-latest` — `catthehacker/ubuntu:act-latest` (есть Docker CLI, node, git, curl);
